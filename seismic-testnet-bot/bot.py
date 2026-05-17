@@ -12,23 +12,16 @@ Seismic Testnet Telegram Bot
 import json
 import os
 import logging
-import asyncio
 import time
 from pathlib import Path
-from typing import Optional
 
-import aiohttp
 from eth_account import Account
 from web3 import Web3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
-    CallbackQueryHandler,
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
 )
 
 # ─── Config ──────────────────────────────────────────────────────────
@@ -42,59 +35,17 @@ SEISMIC_COMMUNITY_FAUCET = "https://community-faucet.seismictest.net"
 
 WALLETS_FILE = Path("wallets.json")
 
-# Simple ERC-20 contract bytecode (minimal token for testnet interaction)
-SIMPLE_CONTRACT_BYTECODE = (
-    "0x608060405234801561001057600080fd5b506040518060400160405280600a"
-    "81526020017f5365697363546f6b656e00000000000000000000000000000000"
-    "00000000000000815250600090816100579190610234565b50604051806040016"
-    "040528060048152602001635345495360e01b815250600190816100839190610234565b"
-    "50601260025569152d02c7e14af68000006003553360045560035460056000335f"
-    "6001600160a01b03166001600160a01b031681526020019081526020015f20553461"
-    "0306565b634e487b7160e01b5f52604160045260245ffd5b600181811c908216806"
-    "1011557607f821691505b602082108103610133576100d0565b50919050565b5f81"
-    "9050815f5260205f209050919050565b5f6020601f8301049050919050565b5f82"
-    "821b905092915050565b5f6101816008830261016d7fffffffffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffff82610160565b61018b8683610160565b"
-    "95508019841693508086168417925050509392505050565b5f819050919050565b5f6101"
-    "bd6101b86101b3846101a1565b6101a1565b6101a1565b9050919050565b5f6101cf838361"
-    "0158565b9150826002028217905092915050565b6101e88261013957600080fd5b6101f182"
-    "610149565b61020081836101c4565b925060208210156102205761021b7fffffffffffffffffff"
-    "ffffffffffffffffffffffffffffffffffffffffffffff83610158565b831692505b505091905056"
+# Simple storage contract bytecode for testnet deployment
+SIMPLE_STORAGE_BYTECODE = (
+    "0x608060405234801561001057600080fd5b5060f78061001f6000396000f3fe"
+    "6080604052348015600f57600080fd5b5060043610603c5760003560e01c8063"
+    "209652551460415780632096525514605b57806355241077146075575b600080fd5b"
+    "60476087565b60405190815260200160405180910390f35b60616087565b60405190"
+    "815260200160405180910390f35b608560048036036020811015608957600080fd5b"
+    "50356090565b005b60005490565b60005556fea264697066735822122000000000"
+    "0000000000000000000000000000000000000000000000000000000064736f6c"
+    "6343000812003300000000000000000000000000000000000000000000000000"
 )
-
-SIMPLE_CONTRACT_ABI = [
-    {
-        "inputs": [],
-        "name": "name",
-        "outputs": [{"type": "string"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [],
-        "name": "symbol",
-        "outputs": [{"type": "string"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"name": "account", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "to", "type": "address"},
-            {"name": "amount", "type": "uint256"},
-        ],
-        "name": "transfer",
-        "outputs": [{"type": "bool"}],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-]
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -238,7 +189,7 @@ async def generate_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         text += (
             f"📌 *Wallet #{w['index']}*\n"
             f"Address: `{w['address']}`\n"
-            f"Private Key: ||`{w['private_key']}`||\n"
+            f"Private Key: `{w['private_key']}`\n"
             f"[Explorer]({explorer_link(w['address'])})\n\n"
         )
 
@@ -377,23 +328,11 @@ async def deploy_contract(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         nonce = w3.eth.get_transaction_count(acct.address)
         gas_price = w3.eth.gas_price
 
-        # Deploy a simple storage contract
-        simple_bytecode = (
-            "0x608060405234801561001057600080fd5b5060f78061001f6000396000f3fe"
-            "6080604052348015600f57600080fd5b5060043610603c5760003560e01c8063"
-            "209652551460415780632096525514605b57806355241077146075575b600080fd5b"
-            "60476087565b60405190815260200160405180910390f35b60616087565b60405190"
-            "815260200160405180910390f35b608560048036036020811015608957600080fd5b"
-            "50356090565b005b60005490565b60005556fea264697066735822122000000000"
-            "0000000000000000000000000000000000000000000000000000000064736f6c"
-            "6343000812003300000000000000000000000000000000000000000000000000"
-        )
-
         tx = {
             "nonce": nonce,
             "gasPrice": gas_price,
             "gas": 500000,
-            "data": simple_bytecode,
+            "data": SIMPLE_STORAGE_BYTECODE,
             "chainId": SEISMIC_CHAIN_ID,
             "value": 0,
         }
@@ -650,22 +589,11 @@ async def run_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             acct = Account.from_key(w["private_key"])
             nonce = w3.eth.get_transaction_count(acct.address)
 
-            simple_bytecode = (
-                "0x608060405234801561001057600080fd5b5060f78061001f6000396000f3fe"
-                "6080604052348015600f57600080fd5b5060043610603c5760003560e01c8063"
-                "209652551460415780632096525514605b57806355241077146075575b600080fd5b"
-                "60476087565b60405190815260200160405180910390f35b60616087565b60405190"
-                "815260200160405180910390f35b608560048036036020811015608957600080fd5b"
-                "50356090565b005b60005490565b60005556fea264697066735822122000000000"
-                "0000000000000000000000000000000000000000000000000000000064736f6c"
-                "6343000812003300000000000000000000000000000000000000000000000000"
-            )
-
             tx = {
                 "nonce": nonce,
                 "gasPrice": w3.eth.gas_price,
                 "gas": 500000,
-                "data": simple_bytecode,
+                "data": SIMPLE_STORAGE_BYTECODE,
                 "chainId": SEISMIC_CHAIN_ID,
                 "value": 0,
             }
