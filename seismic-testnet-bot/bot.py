@@ -15,6 +15,7 @@ import logging
 import time
 from pathlib import Path
 
+import aiohttp
 from eth_account import Account
 from web3 import Web3
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -262,34 +263,122 @@ async def claim_faucet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    text = (
-        "💧 *Seismic Faucet - Testnet ETH Claim*\n\n"
-        "Seismic Faucet se testnet ETH claim karne ke liye:\n\n"
-        "1️⃣ Neeche diye gaye faucet link pe jao\n"
-        "2️⃣ Discord se sign-in karo (Magnitude 5+ role chahiye)\n"
-        "3️⃣ Apna wallet address paste karo\n"
-        "4️⃣ Claim karo (0.5 ETH per 24 hours)\n\n"
-        "📋 *Aapke Wallet Addresses (copy karo):*\n\n"
-    )
-    for i, w in enumerate(user_wallets, 1):
-        text += f"*#{i}:* `{w['address']}`\n"
+    msg = await update.message.reply_text("💧 Faucet claim ho raha hai, wait karo...")
 
-    keyboard = [
-        [
-            InlineKeyboardButton("💧 Community Faucet", url=SEISMIC_COMMUNITY_FAUCET),
-            InlineKeyboardButton("💧 Dev Faucet", url=SEISMIC_FAUCET),
-        ],
-        [
-            InlineKeyboardButton(
-                "📖 Seismic Discord", url="https://discord.gg/seismicsystems"
-            ),
-        ],
+    # Step 1: Try all known faucet API endpoints
+    claimed_wallets = []
+    faucet_endpoints = [
+        ("https://faucet.seismictest.net/api/claim", "Seismic Testnet"),
+        ("https://community-faucet.seismictest.net/api/claim", "Community"),
+        ("https://faucet-2.seismicdev.net/api/claim", "Dev Faucet"),
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        text, parse_mode="Markdown", reply_markup=reply_markup, disable_web_page_preview=True
-    )
+    for w in user_wallets:
+        for endpoint, name in faucet_endpoints:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        endpoint,
+                        json={"address": w["address"]},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data.get("hash") or data.get("success"):
+                                claimed_wallets.append((w, name))
+                                break
+            except Exception:
+                continue
+
+    # Step 2: Auto-distribute from funded wallets to unfunded ones
+    funded = []
+    unfunded = []
+    for w in user_wallets:
+        bal = get_balance(w["address"])
+        if bal > 0.002:
+            funded.append((w, bal))
+        elif bal <= 0.001:
+            unfunded.append(w)
+
+    distributed = []
+    if funded and unfunded:
+        source_w, source_bal = max(funded, key=lambda x: x[1])
+        amount_each = min((source_bal * 0.7) / len(unfunded), 0.1)
+        if amount_each > 0.0005:
+            acct = Account.from_key(source_w["private_key"])
+            nonce = w3.eth.get_transaction_count(acct.address)
+            for uw in unfunded:
+                try:
+                    tx = {
+                        "nonce": nonce,
+                        "to": Web3.to_checksum_address(uw["address"]),
+                        "value": Web3.to_wei(amount_each, "ether"),
+                        "gas": 21000,
+                        "gasPrice": w3.eth.gas_price,
+                        "chainId": SEISMIC_CHAIN_ID,
+                    }
+                    signed = acct.sign_transaction(tx)
+                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+                    distributed.append(
+                        f"✅ `{short_addr(uw['address'])}` ← {amount_each:.4f} ETH"
+                    )
+                    nonce += 1
+                except Exception as e:
+                    distributed.append(
+                        f"❌ `{short_addr(uw['address'])}` ← Failed: {str(e)[:40]}"
+                    )
+
+    # Build response
+    text = "💧 *Faucet Results:*\n\n"
+
+    if claimed_wallets:
+        text += "*API Faucet Claims:*\n"
+        for w, name in claimed_wallets:
+            text += f"✅ `{short_addr(w['address'])}` via {name}\n"
+        text += "\n"
+
+    if distributed:
+        text += "*Auto-Distribution (funded → unfunded):*\n"
+        text += "\n".join(distributed) + "\n\n"
+        text += f"📤 Source: `{short_addr(source_w['address'])}`\n"
+    elif not claimed_wallets:
+        if not funded:
+            text += (
+                "❌ Koi funded wallet nahi mila!\n\n"
+                "Pehle ek wallet mein manually ETH bhejo:\n"
+            )
+            text += f"Address: `{user_wallets[0]['address']}`\n\n"
+            text += (
+                "*MetaMask se fund karo:*\n"
+                f"RPC: `{SEISMIC_RPC}`\n"
+                f"Chain ID: `{SEISMIC_CHAIN_ID}`\n\n"
+                "Ya neeche faucet link se claim karo:\n"
+            )
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "💧 Seismic Faucet", url=SEISMIC_COMMUNITY_FAUCET
+                    ),
+                ],
+            ]
+            await msg.edit_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                disable_web_page_preview=True,
+            )
+            return
+        else:
+            text += "✅ Saare wallets already funded hain!\n"
+
+    # Show final balances
+    text += "\n*Updated Balances:*\n"
+    for i, w in enumerate(user_wallets, 1):
+        bal = get_balance(w["address"])
+        text += f"#{i} `{short_addr(w['address'])}` → {bal:.6f} ETH\n"
+
+    await msg.edit_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 # ─── Deploy Contract ─────────────────────────────────────────────────
